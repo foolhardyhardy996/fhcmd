@@ -116,11 +116,13 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
         conn_state->buf.len += nread;
         /* handle the received data progressively */
         cmd_state = conn_state->cmd_state;
-        cmd_entry->recv();
-        if (/* cmd is complete */) {
+        cmd_entry = cmd_state->cmd_entry;
+        cmd_entry->recv(cmd_state, &(conn_state->buf));
+        if (cmd_entry->is_completed(cmd_state)) {
             /* send ack */
-            if (/* there is more cmd */) {
-
+            cmd_entry->send_ack(cmd_state);
+            if (cmd_entry->has_next(cmd_state)) {
+                /* clear all the states for processing next cmd */
             } else {
                 /* shutdown */
             }
