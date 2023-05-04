@@ -37,9 +37,18 @@ int fhmsg_server_init(struct fhmsg_server *server, struct fhmsg_agent *agent) {
     ret = uv_thread_create(server->thread, /*thread callback*/, /*callback arg*/); // where to join?
     if (ret != 0) {
         printf("[ERROR]: fail to create thread: %s\n", uv_strerror(ret));
-        goto release_tcp;
+        goto release_thread;
     }
     return 0;
+
+release_thread:
+    free(server->thread);
+release_tcp:
+    free(server->tcp);
+release_loop:
+    uv_loop_close(server->loop);
+    free(server->loop);
+    return -1;
 }
 
 static void on_connection(uv_stream_t *tcp, int status) {
@@ -71,6 +80,12 @@ static void on_connection(uv_stream_t *tcp, int status) {
         printf("[ERROR]: fail to start reading: %s\n", uv_strerror(ret));
         goto release_conn_state;
     }
+
+release_conn_state:
+    conn_state_fin(conn_state);
+    free(conn_state);
+release_conn:
+    free(conn);
 }
 
 static void alloc_from_conn_state_buf(uv_handle_t *conn, size_t size, uv_buf_t *buf) {
@@ -87,20 +102,25 @@ static void alloc_from_conn_state_buf(uv_handle_t *conn, size_t size, uv_buf_t *
     buf->len = size;
 }
 
+static void abort_conn(uv_stream_t *conn) {
+
+}
+
 static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
     struct conn_state *conn_state;
     struct cmd_entry *cmd_entry;
     struct cmd_state *cmd_state;
     uv_write_t *wt;
+    uv_buf_t *buf;
     uv_shutdown_t *sd;
     int ret;
 
     if (buf->base == NULL) {
-
+        /* err ack and abort */
     }
     if (nread < 0) { 
         if (/* the cmd is not complete*/) {
-
+            /* err ack and abort */
         } else {
             if (nread == U_EOF) {
 
@@ -117,10 +137,19 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
         /* handle the received data progressively */
         cmd_state = conn_state->cmd_state;
         cmd_entry = cmd_state->cmd_entry;
-        cmd_entry->recv(cmd_state, &(conn_state->buf));
+        cmd_entry->recv(cmd_state, &(conn_state->rxbuf));
         if (cmd_entry->is_completed(cmd_state)) {
-            /* send ack */
-            cmd_entry->send_ack(cmd_state);
+            /* send ack (possibly in chain) */
+            cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback
+            wt = (uv_write_t *)malloc(sizeof(uv_write_t)); // where to release it?
+            buf = (uv_buf_t *)malloc(sizeof(uv_buf_t)); // where to release it?
+            wt->data = (void *)buf;
+            buf->base = conn_state->txbuf->base + conn_state->txbuf->head;
+            ret = uv_write(wt, conn, buf, 1, /* after write callback */);
+            /* write error can't be elegantly handled */
+            if (ret != 0) {
+                /* shutdown and abort */
+            }
             if (cmd_entry->has_next(cmd_state)) {
                 /* clear all the states for processing next cmd */
             } else {
@@ -128,4 +157,9 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
             }
         }
     }
+}
+
+void write_ack(uv_write_t *wt, int status) {
+    uv_stream_t *conn = (uv_stream_t *)wt->handle;
+    struct conn_state *conn_state = (struct conn_state *)conn->data;
 }
