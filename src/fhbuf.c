@@ -2,7 +2,7 @@
 
 #define FHBUF_CAP (128*1024)
 struct fhbuf {
-    uint8_t base[BUF_CAP];
+    uint8_t base[FHBUF_CAP];
     int head;
     int len;
 };

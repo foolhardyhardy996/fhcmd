@@ -7,6 +7,6 @@ struct cmd_entry {
     int (*recv)(struct cmd_state *cmd_state, struct fhbuf *rxbuf);
     int (*send_ack)(struct cmd_state *cmd_state, struct fhbuf *txbuf);
     int (*recv_ack)(struct cmd_state *cmd_state, struct fhbuf *rxbuf);
-    // int (*is_completed)(struct cmd_state *cmd_state); /* is completed on receiving? */ // it seems to be redundant
+    int (*)(struct cmd_state *cmd_state); /* is completed on receiving? */ 
     int (*has_next)(struct cmd_state *cmd_state);
 };
