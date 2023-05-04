@@ -1,71 +1,10 @@
-#pragma once 
 
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-
-struct cmd_state {
-    size_t head_bytes_len;
-    size_t body_bytes_len;
-    size_t tail_bytes_len;
-    size_t ack_head_bytes_len;
-    size_t ack_body_bytes_len;
-    size_t ack_tail_bytes_len;
-    void *p_cmd_struct;
-};
-
-#define BUF_CAP (128*1024)
-struct buf {
-    uint8_t base[BUF_CAP];
-    int head;
-    int len;
-};
-
-struct conn_state {
-    struct buf buf;
-    fhmsg_server *parent;
-};
-
-struct comm_state {
-    uint8_t *head;
-    int head_len;
-    uint8_t *payload;
-    int payload_len;
-    uint8_t *ackhead;
-    int ackhead_len;
-    uint8_t *ackpayload;
-    int ackpayload_len;
-};
-
-struct cmd_entry {
-    int id;
-    char name[32];
-    int (*send_bytes)(uint8_t *, int);
-    int (*rec_action)(uint8_t *, int);
-    int (*ack_action)(uint8_t *, int);
-};
 
 struct fhmsg_server {
     uv_loop_t *loop;
     uv_tcp_t *tcp;
     uv_thread_t *thread;
 };
-
-void buf_init(struct buf *buf) {
-    buf->head = 0;
-    buf->len = 0;
-}
-
-void buf_compact(struct buf *buf) {
-    memmove(buf->base, buf->base + buf->head, buf->len);
-    buf->head = 0;
-}
-
-void conn_state_init(struct conn_state *conn_state, struct fhmsg_server *parent) {
-    buf_init(&(conn_state->buf));
-    conn_state->parent = parent;
-}
 
 int fhmsg_server_init(struct fhmsg_server *server, struct fhmsg_agent *agent) {
     struct sockaddr_in sockaddr;
@@ -149,27 +88,42 @@ static void alloc_from_conn_state_buf(uv_handle_t *conn, size_t size, uv_buf_t *
 }
 
 static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
+    struct conn_state *conn_state;
+    struct cmd_entry *cmd_entry;
+    struct cmd_state *cmd_state;
     uv_write_t *wt;
     uv_shutdown_t *sd;
     int ret;
 
-    if (nread < 0) { 
-        if (nread == UV_EOF) {
-
-        } else {
-            
-        }
-    } else {
+    if (buf->base == NULL) {
 
     }
+    if (nread < 0) { 
+        if (/* the cmd is not complete*/) {
+
+        } else {
+            if (nread == U_EOF) {
+
+            } else {
+
+            }
+        }
+    } else if (nread == 0) {
+
+    } else {
+        /* update conn_state->buf */
+        conn_state = (struct conn_state *)conn->data;
+        conn_state->buf.len += nread;
+        /* handle the received data progressively */
+        cmd_state = conn_state->cmd_state;
+        cmd_entry->recv();
+        if (/* cmd is complete */) {
+            /* send ack */
+            if (/* there is more cmd */) {
+
+            } else {
+                /* shutdown */
+            }
+        }
+    }
 }
-
-struct fhmsg_agent {
-    /*something like config?*/ server_config;
-    int head_len;
-    struct fhmsg_server server;
-    struct fhmsg_client client;
-    struct cmd_entry *cmd_registry;
-
-};
-
