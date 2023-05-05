@@ -1,15 +1,23 @@
 
 
-struct fhmsg_server {
+struct fhcmd_server {
+    struct fhcmd_agent *parent;
     uv_loop_t *loop;
     uv_tcp_t *tcp;
     uv_thread_t *thread;
 };
+// how to properly stop server is tricky.
+// First, request to close tcp
+// Then, every connection from the tcp will be cancelled
+//     handle those cancelled connections
+// When the loop ends
+//     close the loop
 
-int fhmsg_server_init(struct fhmsg_server *server, struct fhmsg_agent *agent) {
+int fhcmd_server_open(struct fhcmd_server *server, struct fhcmd_agent *parent) {
     struct sockaddr_in sockaddr;
     int ret;
 
+    server->parent = agent;
     server->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t)); // where to release it?
     uv_loop_init(server->loop); // where to closse it?
     server->tcp = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // where to release it?
@@ -19,9 +27,9 @@ int fhmsg_server_init(struct fhmsg_server *server, struct fhmsg_agent *agent) {
         goto release_tcp;
     }
     server->tcp->data = (void *)server;
-    ret = uv_ip4_addr("localhost", agent->server_config->port, &sockaddr);
+    ret = uv_ip4_addr("localhost", parent->server_config->port, &sockaddr);
     if (ret != 0) {
-        printf("[ERROR]: fail to construct socket address for %s and %d\n", "localhost", agent->server_config->port);
+        printf("[ERROR]: fail to construct socket address for %s and %d\n", "localhost", parent->server_config->port);
         goto release_tcp;
     }
     ret = uv_tcp_bind(server->tcp, (const struct sockaddr *)&sockaddr, 0);
@@ -49,6 +57,18 @@ release_loop:
     uv_loop_close(server->loop);
     free(server->loop);
     return -1;
+}
+
+static void run_event_loop(void *arg) {
+    struct fhcmd_server *server = (struct fhcmd_server *)arg;
+    int ret;
+
+    ret = uv_run(server->loop, UV_RUN_DEFAULT); // when will it return? and what should I do when return?
+    if (ret != 0) {
+        printf("[ERROR]: uv_run error: %s\n" uv_strerror(ret));
+    }
+    // what kind finalize should I do here?
+    uv_loop_close(server->loop);
 }
 
 static void on_connection(uv_stream_t *tcp, int status) {
@@ -140,16 +160,7 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
         cmd_entry->recv(cmd_state, &(conn_state->rxbuf));
         if (cmd_entry->is_completed(cmd_state)) {
             /* send ack (possibly in chain) */
-            cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback
-            wt = (uv_write_t *)malloc(sizeof(uv_write_t)); // where to release it?
-            buf = (uv_buf_t *)malloc(sizeof(uv_buf_t)); // where to release it?
-            wt->data = (void *)buf;
-            buf->base = conn_state->txbuf->base + conn_state->txbuf->head;
-            ret = uv_write(wt, conn, buf, 1, /* after write callback */);
-            /* write error can't be elegantly handled */
-            if (ret != 0) {
-                /* shutdown and abort */
-            }
+            try_launch_write_request(conn);
             if (cmd_entry->has_next(cmd_state)) {
                 /* clear all the states for processing next cmd */
             } else {
@@ -159,7 +170,51 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
     }
 }
 
+static void try_launch_write_request(uv_stream_t *conn) {
+    ret = cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback
+    if (ret == 0) { // have something to write
+        launch_write_request(conn);
+    } else { // nothing to write or other error condition
+
+    }
+}
+
+static void launch_write_request(uv_stream_t *conn) {
+    uv_write_t *wt;
+    uv_buf_t *buf;
+    int ret;
+
+    wt = (uv_write_t *)malloc(sizeof(uv_write_t)); // where to release it?
+    buf = (uv_buf_t *)malloc(sizeof(uv_buf_t)); // where to release it?
+    wt->data = (void *)buf;
+    buf->base = conn_state->txbuf->base + conn_state->txbuf->head;
+    buf->len = conn_state->txbuf->len;
+    ret = uv_write(wt, conn, buf, 1, /* after write callback */);
+    /* write error can't be elegantly handled */
+    if (ret != 0) {
+        /* shutdown and abort */
+    }
+}
+
 void write_ack(uv_write_t *wt, int status) {
     uv_stream_t *conn = (uv_stream_t *)wt->handle;
     struct conn_state *conn_state = (struct conn_state *)conn->data;
+    struct cmd_state *cmd_state = conn_state->cmd_state;
+    struct cmd_entry *cmd_entry = cmd_state->cmd_entry;
+    uv_write_t *wt;
+    uv_buf_t *buf;
+
+    if (status != 0) {
+
+    } else {
+        /* write success, so update txbuf */
+        conn_state->txbuf->head = 0;
+        conn_state->txbuf->len = 0;
+        /* launch further write, if any */
+        try_launch_write_request(conn);
+    }
+}
+
+int fhcmd_server_close(struct fhcmd_server *server) {
+    uv_close((uv_handle_t *)server->tcp, /* after close tcp, wait the event loop ends */);
 }
