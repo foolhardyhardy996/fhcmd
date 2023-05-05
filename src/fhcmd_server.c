@@ -138,10 +138,10 @@ static void free_aborted_conn(uv_handle_t *conn) {
 static void process_avaliable_data(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
     struct conn_state *conn_state;
     struct cmd_entry *cmd_entry;
-    struct cmd_state *cmd_state;
+    struct cmd_state *cmd_state, *next_cmd_state;
+    struct cmd_ack_state *cmd_ack_state;
     uv_write_t *wt;
     uv_buf_t *buf;
-    uv_shutdown_t *sd;
     int ret;
 
     if (buf->base == NULL) {
@@ -174,15 +174,20 @@ static void process_avaliable_data(uv_stream_t *conn, ssize_t nread, const uv_bu
         }
         if (ret == FHCMD_COMPLETE) { 
             /* send ack (possibly in chain) */
+            // cmd_state should be passed to wt and maintained by wt then
+            cmd_ack_state = (struct cmd_ack_state *)malloc(sizeof(cmd_ack_state)); // where to release it?
+            cmd_ack_state_init(cmd_ack_state, cmd_state);
             try_launch_write_request(conn);
-            if (cmd_entry->has_next(cmd_state)) {
-                /* clear all the states for processing next cmd */
-            } else {
-                /* shutdown */
+            /* spawn a cmd_ack_state */
+            /* detach current cmd_state */
+            if (cmd_entry->has_next(cmd_state) == 0) {
+                /* stop further read */
             }
         }
     }
 }
+
+static void translate
 
 static void try_launch_write_request(uv_stream_t *conn) {
     ret = cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback

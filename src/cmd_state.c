@@ -9,5 +9,7 @@ struct cmd_state {
     size_t ack_tail_bytes_len;
     void *cmd_struct;
     struct cmd_entry *cmd_entry; 
+    struct conn_state *parent;
 };
 
+void cmd_state_shift2next(struct cmd_state *current, struct cmd_state *next);
