@@ -1,12 +1,5 @@
 #include "fhcmd_agent.h"
 
-// how to properly stop server is tricky.
-// First, request to close tcp
-// Then, every connection from the tcp will be cancelled
-//     handle those cancelled connections
-// When the loop ends
-//     close the loop
-
 static void run_event_loop(void *arg);
 static void receive_incomming_connection(uv_stream_t *tcp, int status);
 static void alloc_from_rxbuf(uv_handle_t *conn, size_t size, uv_buf_t *buf);
@@ -16,13 +9,13 @@ int fhcmd_server_open(struct fhcmd_server *server, struct fhcmd_agent *parent) {
     int ret;
 
     server->parent = parent;
-    server->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t)); // release it when thread running this loop joined
-    ret = uv_loop_init(server->loop); // close it before free
+    server->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t)); // release it when closing
+    ret = uv_loop_init(server->loop); // close it when closing the server
     if (ret  != 0) {
         printf("[ERROR]: fail to init event loop: %s\n", uv_strerror(ret));
         goto release_loop;
     }
-    server->tcp = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // release it after it has been closed
+    server->tcp = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // release it when closing the server
     ret = uv_tcp_init(server->loop, server->tcp);
     if (ret != 0) {
         printf("[ERROR]: fail to init tcp server: %s\n", uv_strerror(ret));
@@ -43,8 +36,8 @@ int fhcmd_server_open(struct fhcmd_server *server, struct fhcmd_agent *parent) {
     if (ret != 0) {
         printf("[ERROR]: fail to listen: %s\n", uv_strerror(ret));
         goto release_tcp;
-    server->thread = (uv_thread_t *)malloc(sizeof(uv_thread_t)); // release when the thread joined
-    ret = uv_thread_create(server->thread, run_event_loop, (void *)server); // where to join?
+    server->thread = (uv_thread_t *)malloc(sizeof(uv_thread_t)); // release when closing the server
+    ret = uv_thread_create(server->thread, run_event_loop, (void *)server); // join when closing the server
     if (ret != 0) {
         printf("[ERROR]: fail to create thread: %s\n", uv_strerror(ret));
         goto release_thread;
@@ -69,18 +62,17 @@ static void run_event_loop(void *arg) {
     if (ret != 0) {
         printf("[ERROR]: uv_run error: %s\n" uv_strerror(ret));
     }
-    // what kind finalize should I do here?
-    uv_loop_close(server->loop);
 }
 
 static void receive_incomming_connection(uv_stream_t *tcp, int status) {
     struct fhcmd_server *server = (fhmsg_server *)tcp->data;
     uv_tcp_t *conn;
     struct conn_state *conn_state;
+    struct cmd_state *cmd_state;
     int ret;
 
     if (status != 0) {
-        printf("[ERROR]: error status on connection: %s\n", uv_strerror(status));
+        printf("[ERROR]: error on receiving connection: %s\n", uv_strerror(status));
         return;
     }
     conn = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // release it when terminating or aborting connection
@@ -89,8 +81,10 @@ static void receive_incomming_connection(uv_stream_t *tcp, int status) {
         printf("[ERROR]: fail to initialize connection: %s\n", uv_strerror(ret));
         goto release_conn;
     }
+    cmd_state = (struct cmd_state *)malloc(sizeof(struct cmd_state));
     conn_state = (struct conn_state *)malloc(sizeof(struct conn_state)); // release it when terminating or aborting connection
-    conn_state_init(conn_state, server);
+    cmd_state_init(cmd_state, conn_state); // where to finalize it?
+    conn_state_init(conn_state, server, conn_state); // where to release it?
     conn->data = (void *)conn_state;
     ret = uv_accept(tcp, (uv_stream_t *)conn);
     if (ret != 0) {
@@ -106,6 +100,9 @@ static void receive_incomming_connection(uv_stream_t *tcp, int status) {
 release_conn_state:
     conn_state_fin(conn_state);
     free(conn_state);
+release_cmd_state:
+    cmd_state_fin(cmd_state);
+    free(cmd_state);
 release_conn:
     free(conn);
 }
@@ -139,7 +136,7 @@ static void process_avaliable_data(uv_stream_t *conn, ssize_t nread, const uv_bu
     struct conn_state *conn_state;
     struct cmd_entry *cmd_entry;
     struct cmd_state *cmd_state, *next_cmd_state;
-    struct cmd_ack_state *cmd_ack_state;
+    struct ack_state *ack_state;
     uv_write_t *wt;
     uv_buf_t *buf;
     int ret;
@@ -177,17 +174,35 @@ static void process_avaliable_data(uv_stream_t *conn, ssize_t nread, const uv_bu
             // cmd_state should be passed to wt and maintained by wt then
             cmd_ack_state = (struct cmd_ack_state *)malloc(sizeof(cmd_ack_state)); // where to release it?
             cmd_ack_state_init(cmd_ack_state, cmd_state);
+            next_cmd_state = (struct cmd_state *)malloc(sizeof(struct cmd_state)); // where to free it?
+            cmd_state_init(next_cmd_state, conn_state); // where to finalize it?
+            conn_state->cmd_state = next_cmd_state;
             try_launch_write_request(conn);
             /* spawn a cmd_ack_state */
             /* detach current cmd_state */
             if (cmd_entry->has_next(cmd_state) == 0) {
                 /* stop further read */
+                uv_read_stop(conn);
             }
         }
     }
 }
 
-static void translate
+struct wt_state {
+    uv_write_t *wt;
+    struct fhbuf *txbuf;
+    uv_buf_t *buf;
+};
+
+static void send_ack(struct ack_state *ack_state) {
+    int ret;
+    struct cmd_state *cmd_state = ack_state->parent;
+    struct conn_state *conn_state = cmd_state->parent;
+    struct fhbuf *txbuf;
+    uv_write_t 
+
+    ret = 
+}
 
 static void try_launch_write_request(uv_stream_t *conn) {
     ret = cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback
@@ -235,8 +250,12 @@ void write_ack(uv_write_t *wt, int status) {
     }
 }
 
+void notify_after_closing(uv_handle_t *server) {
+    printf("[INFO]: tcp server closed.\n");
+}
+
 int fhcmd_server_close(struct fhcmd_server *server) {
-    uv_close((uv_handle_t *)server->tcp, /* after close tcp, wait the event loop ends */);
+    uv_close((uv_handle_t *)server->tcp, notify_after_closing);
     uv_thread_join(server->thread); // okay to free resource
     uv_loop_close(server->loop);
     free(server->thread);

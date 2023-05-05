@@ -12,4 +12,6 @@ struct cmd_state {
     struct conn_state *parent;
 };
 
-void cmd_state_shift2next(struct cmd_state *current, struct cmd_state *next);
+void cmd_state_init(struct cmd_state *cmd_state, struct ) {
+
+}
