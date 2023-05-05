@@ -1,11 +1,5 @@
+#include "fhcmd_agent.h"
 
-
-struct fhcmd_server {
-    struct fhcmd_agent *parent;
-    uv_loop_t *loop;
-    uv_tcp_t *tcp;
-    uv_thread_t *thread;
-};
 // how to properly stop server is tricky.
 // First, request to close tcp
 // Then, every connection from the tcp will be cancelled
@@ -13,23 +7,31 @@ struct fhcmd_server {
 // When the loop ends
 //     close the loop
 
+static void run_event_loop(void *arg);
+static void receive_incomming_connection(uv_stream_t *tcp, int status);
+static void alloc_from_rxbuf(uv_handle_t *conn, size_t size, uv_buf_t *buf);
+
 int fhcmd_server_open(struct fhcmd_server *server, struct fhcmd_agent *parent) {
     struct sockaddr_in sockaddr;
     int ret;
 
-    server->parent = agent;
-    server->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t)); // where to release it?
-    uv_loop_init(server->loop); // where to closse it?
-    server->tcp = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // where to release it?
+    server->parent = parent;
+    server->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t)); // release it when thread running this loop joined
+    ret = uv_loop_init(server->loop); // close it before free
+    if (ret  != 0) {
+        printf("[ERROR]: fail to init event loop: %s\n", uv_strerror(ret));
+        goto release_loop;
+    }
+    server->tcp = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // release it after it has been closed
     ret = uv_tcp_init(server->loop, server->tcp);
     if (ret != 0) {
         printf("[ERROR]: fail to init tcp server: %s\n", uv_strerror(ret));
         goto release_tcp;
     }
     server->tcp->data = (void *)server;
-    ret = uv_ip4_addr("localhost", parent->server_config->port, &sockaddr);
+    ret = uv_ip4_addr("localhost", parent->config->port, &sockaddr);
     if (ret != 0) {
-        printf("[ERROR]: fail to construct socket address for %s and %d\n", "localhost", parent->server_config->port);
+        printf("[ERROR]: fail to construct socket address for %s and %d\n", "localhost", parent->config->port);
         goto release_tcp;
     }
     ret = uv_tcp_bind(server->tcp, (const struct sockaddr *)&sockaddr, 0);
@@ -37,12 +39,12 @@ int fhcmd_server_open(struct fhcmd_server *server, struct fhcmd_agent *parent) {
         printf("[ERROR]: fail to bind socket address to tcp server: %s\n", uv_strerror(ret));
         goto release_tcp;
     }
-    ret = uv_listen((uv_stream_t *)server->tcp, agent->server_config->backlog, /*on_connection callback*/);
+    ret = uv_listen((uv_stream_t *)server->tcp, agent->config->backlog, receive_incomming_connection);
     if (ret != 0) {
         printf("[ERROR]: fail to listen: %s\n", uv_strerror(ret));
         goto release_tcp;
-    server->thread = (uv_thread_t *)malloc(sizeof(uv_thread_t)); // where to release it?
-    ret = uv_thread_create(server->thread, /*thread callback*/, /*callback arg*/); // where to join?
+    server->thread = (uv_thread_t *)malloc(sizeof(uv_thread_t)); // release when the thread joined
+    ret = uv_thread_create(server->thread, run_event_loop, (void *)server); // where to join?
     if (ret != 0) {
         printf("[ERROR]: fail to create thread: %s\n", uv_strerror(ret));
         goto release_thread;
@@ -71,8 +73,8 @@ static void run_event_loop(void *arg) {
     uv_loop_close(server->loop);
 }
 
-static void on_connection(uv_stream_t *tcp, int status) {
-    struct fhmsg_server *server = (fhmsg_server *)tcp->data;
+static void receive_incomming_connection(uv_stream_t *tcp, int status) {
+    struct fhcmd_server *server = (fhmsg_server *)tcp->data;
     uv_tcp_t *conn;
     struct conn_state *conn_state;
     int ret;
@@ -81,13 +83,13 @@ static void on_connection(uv_stream_t *tcp, int status) {
         printf("[ERROR]: error status on connection: %s\n", uv_strerror(status));
         return;
     }
-    conn = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // where to release it?
+    conn = (uv_tcp_t *)malloc(sizeof(uv_tcp_t)); // release it when terminating or aborting connection
     ret = uv_tcp_init(server->loop, conn);
     if (ret != 0) {
         printf("[ERROR]: fail to initialize connection: %s\n", uv_strerror(ret));
         goto release_conn;
     }
-    conn_state = (struct conn_state *)malloc(sizeof(struct conn_state)); //where to release it?
+    conn_state = (struct conn_state *)malloc(sizeof(struct conn_state)); // release it when terminating or aborting connection
     conn_state_init(conn_state, server);
     conn->data = (void *)conn_state;
     ret = uv_accept(tcp, (uv_stream_t *)conn);
@@ -95,7 +97,7 @@ static void on_connection(uv_stream_t *tcp, int status) {
         printf("[ERROR]: fail to accept connection: %s\n", uv_strerror(ret));
         goto release_conn_state;
     }
-    ret = uv_read_start((uv_stream_t *)conn, /*alloc*/, /*on_read*/);
+    ret = uv_read_start((uv_stream_t *)conn, alloc_from_rxbuf, process_avaliable_data);
     if (ret != 0) {
         printf("[ERROR]: fail to start reading: %s\n", uv_strerror(ret));
         goto release_conn_state;
@@ -108,25 +110,32 @@ release_conn:
     free(conn);
 }
 
-static void alloc_from_conn_state_buf(uv_handle_t *conn, size_t size, uv_buf_t *buf) {
+static void alloc_from_rxbuf(uv_handle_t *conn, size_t size, uv_buf_t *buf) {
     struct conn_state *conn_state = (struct conn_state *)conn->data;
-    if (size > BUF_CAP - conn_state->buf.len) {
-        buf->base = NULL;
-        buf->len = 0;
+    if (size > FHBUF_CAP - conn_state->rxbuf.len) {
+        rxbuf->base = NULL;
+        rxbuf->len = 0;
         return;
     }
-    if (size > BUF_CAP - conn_state->buf.len - conn_state->buf.head) {
-        buf_compact(&(conn_state->buf));
+    if (size > FHBUF_CAP - conn_state->rxbuf.len - conn_state->rxbuf.head) {
+        fhbuf_compact(&(conn_state->rxbuf));
     }
-    buf->base = conn_state->buf.base + conn_state->buf.len; // update buf later when the read actually happen
+    buf->base = conn_state->rxbuf.base + conn_state->rxbuf.len; // update rxbuf later when the read actually happen
     buf->len = size;
 }
 
 static void abort_conn(uv_stream_t *conn) {
-
+    uv_close((uv_handle_t *)conn, /* free_aborted_conn */)
 }
 
-static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
+static void free_aborted_conn(uv_handle_t *conn) {
+    struct conn_state *conn_state = (struct conn_state *)conn;
+    conn_state_fin(conn_state);
+    free(conn_state);
+    free(conn);
+}
+
+static void process_avaliable_data(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
     struct conn_state *conn_state;
     struct cmd_entry *cmd_entry;
     struct cmd_state *cmd_state;
@@ -136,29 +145,34 @@ static void on_read(uv_stream_t *conn, ssize_t nread, const uv_buf_t *buf) {
     int ret;
 
     if (buf->base == NULL) {
-        /* err ack and abort */
+        // rxbuf is full, abort
+        printf("[ERROR]: rxbuf is full, connection abort\n");
+        abort_conn(conn);
+        return;
     }
+    conn_state = (struct conn_state *)conn->data;
+    cmd_state = conn_state->cmd_state;
+    cmd_entry = cmd_state->cmd_entry;
     if (nread < 0) { 
-        if (/* the cmd is not complete*/) {
-            /* err ack and abort */
+        if (nread == UV_EOF && cmd_entry->is_complete(cmd_state)) {
+            return;
         } else {
-            if (nread == U_EOF) {
-
-            } else {
-
-            }
+            printf("[ERROR]: read error: %s\n", uv_strerror(nread));
+            abort_conn(conn);
         }
     } else if (nread == 0) {
-
+        return;
     } else {
         /* update conn_state->buf */
-        conn_state = (struct conn_state *)conn->data;
         conn_state->buf.len += nread;
         /* handle the received data progressively */
-        cmd_state = conn_state->cmd_state;
-        cmd_entry = cmd_state->cmd_entry;
-        cmd_entry->recv(cmd_state, &(conn_state->rxbuf));
-        if (cmd_entry->is_completed(cmd_state)) {
+        ret = cmd_entry->recv(cmd_state, &(conn_state->rxbuf));
+        if (ret != 0 && ret != CMD_COMPLETE) {
+            printf("[ERROR]: recv return %ld(0x%lx)\n", ret, ret);
+            abort_conn(conn);
+            return;
+        }
+        if (ret == FHCMD_COMPLETE) { 
             /* send ack (possibly in chain) */
             try_launch_write_request(conn);
             if (cmd_entry->has_next(cmd_state)) {
@@ -174,8 +188,9 @@ static void try_launch_write_request(uv_stream_t *conn) {
     ret = cmd_entry->send_ack(cmd_state, &(conn_state->txbuf)); // update txbuf in write callback
     if (ret == 0) { // have something to write
         launch_write_request(conn);
-    } else { // nothing to write or other error condition
-
+    } else if (ret != FHCMD_COMPLETE) { // other error condition
+        printf("[ERROR]: send_ack return %ld(0x%lx)\n", ret, ret);
+        abort_conn(conn);
     }
 }
 
@@ -217,4 +232,11 @@ void write_ack(uv_write_t *wt, int status) {
 
 int fhcmd_server_close(struct fhcmd_server *server) {
     uv_close((uv_handle_t *)server->tcp, /* after close tcp, wait the event loop ends */);
+    uv_thread_join(server->thread); // okay to free resource
+    uv_loop_close(server->loop);
+    free(server->thread);
+    free(server->tcp);
+    free(server->loop);
+    server->parent = NULL;
+    return 0;
 }

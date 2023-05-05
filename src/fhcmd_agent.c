@@ -2,23 +2,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-struct comm_state {
-    uint8_t *head;
-    int head_len;
-    uint8_t *payload;
-    int payload_len;
-    uint8_t *ackhead;
-    int ackhead_len;
-    uint8_t *ackpayload;
-    int ackpayload_len;
-};
+#include "fhcmd_server.h"
+#include "fhcmd_client.h"
+#include "agent_config.h"
+#include "fhcmd_agent.h"
 
 struct fhmsg_agent {
-    /*something like config?*/ server_config;
+    struct agent_config config;
     int head_len;
-    struct fhmsg_server server;
-    struct fhmsg_client client;
+    struct fhcmd_server server;
+    struct fhcmd_client client;
     struct cmd_entry *cmd_registry;
 
 };
